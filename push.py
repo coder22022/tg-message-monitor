@@ -49,14 +49,29 @@ def format_message_date(message_date: datetime | None) -> str:
 
 class PushClient:
     def __init__(self, config: dict[str, Any]) -> None:
-        self.enabled = bool(config.get("enabled", True))
+        self.config_enabled = bool(config.get("enabled", True))
         self.url = str(config.get("url", "https://push.i-i.me")).rstrip("/")
         self.method = str(config.get("method", "POST")).upper()
         self.push_key = str(config.get("push_key", "")).strip()
         self.msg_type = str(config.get("type", "text"))
+        self.runtime_enabled = True
 
-        if self.enabled and not self.push_key:
+        if self.config_enabled and not self.push_key:
             raise ValueError("push.push_key 未配置")
+
+    def open_push(self) -> None:
+        self.runtime_enabled = True
+
+    def close_push(self) -> None:
+        self.runtime_enabled = False
+
+    def is_active(self) -> bool:
+        return self.config_enabled and self.runtime_enabled
+
+    def status_text(self) -> str:
+        if not self.config_enabled:
+            return "未启用（配置关闭）"
+        return "已开启" if self.runtime_enabled else "已关闭"
 
     def _build_payload(
         self,
@@ -94,8 +109,11 @@ class PushClient:
         title: str,
         content: str,
         message_date: datetime | None = None,
+        force: bool = False,
     ) -> None:
-        if not self.enabled:
+        if not self.config_enabled:
+            return
+        if not force and not self.runtime_enabled:
             return
 
         payload = self._build_payload(title, content, message_date)

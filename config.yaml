@@ -39,6 +39,11 @@ monitor:
     - "4893951761"
     # - "-1001234567890"
 
+# 可发送管理命令的私信用户（username 或 user_id）
+command:
+  users:
+    - "6905416669"
+
 push:
   enabled: true
   url: "https://push.i-i.me"

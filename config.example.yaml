@@ -23,6 +23,12 @@ monitor:
     - "some_group_username"
     # - "-1001234567890"
 
+# 可发送管理命令的私信用户（username 或 user_id）
+command:
+  users:
+    - "your_user_id"
+    # - "admin_username"
+
 push:
   enabled: true
   url: "https://push.i-i.me"
