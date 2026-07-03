@@ -1,0 +1,31 @@
+# 复制为 config.yaml 后填写真实信息
+#
+# api_id / api_hash 从 https://my.telegram.org 获取（可选）
+# 若官网创建应用报 ERROR，可先省略这两项，程序会使用内置默认值
+
+telegram:
+  # api_id: 12345678
+  # api_hash: "your_api_hash_here"
+  phone: "+8613800138000"
+  # 两步验证密码，未开启则留空
+  password: ""
+  # 会话文件路径，登录成功后复用，无需重复验证码
+  session: "sessions/tg_monitor"
+
+monitor:
+  # 监听私信：来自以下用户的消息（username 或 user_id）
+  private_users:
+    - "some_username"
+    # - "123456789"
+
+  # 监听群组：以下群组中 @ 当前用户 的消息（群组 username 或 chat_id）
+  groups:
+    - "some_group_username"
+    # - "-1001234567890"
+
+push:
+  enabled: true
+  url: "https://push.i-i.me"
+  method: "POST"          # GET 或 POST
+  push_key: "your_push_key"
+  type: "text"

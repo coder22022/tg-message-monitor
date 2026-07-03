@@ -1,0 +1,15 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+sessions/
+*.session
+*.session-journal
+config.yaml
+config.example.yaml
+deploy.sh
+docker-compose.yml
+README.md

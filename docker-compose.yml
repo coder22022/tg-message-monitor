@@ -1,0 +1,15 @@
+services:
+  tg-message-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tg-message-monitor:latest
+    container_name: tg-message-monitor
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./sessions:/app/sessions
+    environment:
+      TZ: Asia/Shanghai
