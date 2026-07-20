@@ -137,6 +137,9 @@ class TgMessageMonitor:
             account = "未知"
 
         push_status = self.push_client.status_text() if self.push_client else "未配置"
+        quiet_hours = (
+            self.push_client.quiet_hours_text() if self.push_client else "未配置"
+        )
         connection = "已连接" if self.client.is_connected() else "未连接"
 
         return (
@@ -144,6 +147,7 @@ class TgMessageMonitor:
             f"连接: {connection}\n"
             f"账号: {account}\n"
             f"推送: {push_status}\n"
+            f"免打扰: {quiet_hours}\n"
             f"监听私信用户: {len(self.private_users)}\n"
             f"监听群组: {len(self.groups)}\n"
             f"命令用户: {len(self.command_users)}\n"

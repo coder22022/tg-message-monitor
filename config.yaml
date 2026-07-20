@@ -51,3 +51,6 @@ push:
   push_key: "LSYRWWamS79qnttRqpTp"
   type: "text"
   heartbeat_interval_minutes: 30
+  quiet_hours:
+    - start: "23:00"
+      end: "09:00"

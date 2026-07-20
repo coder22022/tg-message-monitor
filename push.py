@@ -61,6 +61,49 @@ def format_message_date(message_date: datetime | None) -> str:
 DEFAULT_HEARTBEAT_INTERVAL_MINUTES = 30
 
 
+def _parse_hhmm(value: str) -> int:
+    parts = value.strip().split(":")
+    if len(parts) != 2:
+        raise ValueError(f"时间格式应为 HH:MM，实际为: {value}")
+    hour, minute = int(parts[0]), int(parts[1])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError(f"时间范围无效: {value}")
+    return hour * 60 + minute
+
+
+class QuietPeriod:
+    def __init__(self, start: str, end: str) -> None:
+        self.start_label = start.strip()
+        self.end_label = end.strip()
+        self.start_minutes = _parse_hhmm(self.start_label)
+        self.end_minutes = _parse_hhmm(self.end_label)
+
+    def contains(self, moment: datetime) -> bool:
+        current = moment.hour * 60 + moment.minute
+        if self.start_minutes <= self.end_minutes:
+            return self.start_minutes <= current < self.end_minutes
+        return current >= self.start_minutes or current < self.end_minutes
+
+    def label(self) -> str:
+        return f"{self.start_label}-{self.end_label}"
+
+
+def parse_quiet_periods(config: list[Any] | None) -> list[QuietPeriod]:
+    if not config:
+        return []
+
+    periods: list[QuietPeriod] = []
+    for item in config:
+        if not isinstance(item, dict):
+            raise ValueError("quiet_hours 每项应为包含 start/end 的对象")
+        start = item.get("start")
+        end = item.get("end")
+        if not start or not end:
+            raise ValueError("quiet_hours 每项需配置 start 和 end")
+        periods.append(QuietPeriod(str(start), str(end)))
+    return periods
+
+
 class PushClient:
     def __init__(self, config: dict[str, Any]) -> None:
         self.config_enabled = bool(config.get("enabled", True))
@@ -71,6 +114,7 @@ class PushClient:
         self.heartbeat_interval_minutes = int(
             config.get("heartbeat_interval_minutes", DEFAULT_HEARTBEAT_INTERVAL_MINUTES)
         )
+        self.quiet_periods = parse_quiet_periods(config.get("quiet_hours"))
         self.runtime_enabled = True
         self.last_push_time: datetime | None = None
 
@@ -86,16 +130,31 @@ class PushClient:
     def is_active(self) -> bool:
         return self.config_enabled and self.runtime_enabled
 
+    def is_quiet_hours(self, moment: datetime | None = None) -> bool:
+        if not self.quiet_periods:
+            return False
+        now = moment or datetime.now()
+        return any(period.contains(now) for period in self.quiet_periods)
+
     def status_text(self) -> str:
         if not self.config_enabled:
             return "未启用（配置关闭）"
-        return "已开启" if self.runtime_enabled else "已关闭"
+        if not self.runtime_enabled:
+            return "已关闭"
+        if self.is_quiet_hours():
+            return "已开启（免打扰中）"
+        return "已开启"
+
+    def quiet_hours_text(self) -> str:
+        if not self.quiet_periods:
+            return "未配置"
+        return "、".join(period.label() for period in self.quiet_periods)
 
     def mark_push_sent(self) -> None:
         self.last_push_time = datetime.now()
 
     def needs_heartbeat(self) -> bool:
-        if not self.is_active():
+        if not self.is_active() or self.is_quiet_hours():
             return False
         if self.last_push_time is None:
             return True
@@ -151,6 +210,9 @@ class PushClient:
         if not self.config_enabled:
             return
         if not force and not self.runtime_enabled:
+            return
+        if not force and self.is_quiet_hours():
+            logger.info("免打扰时段，跳过推送: %s", title)
             return
 
         payload = self._build_payload(title, content, message_date)
