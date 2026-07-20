@@ -36,7 +36,8 @@ monitor:
     - "2134280037"
     # 技术内部沟通群
     - "4893951761"
-    # - "-1001234567890"
+    # "TG群"
+    - "5509798997"
 
 # 可发送管理命令的私信用户（username 或 user_id）
 command:
@@ -49,3 +50,4 @@ push:
   method: "POST"          # GET 或 POST
   push_key: "LSYRWWamS79qnttRqpTp"
   type: "text"
+  heartbeat_interval_minutes: 30
