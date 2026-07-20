@@ -18,12 +18,13 @@ monitor:
     - "some_username"
     # - "123456789"
 
-  # 监听群组：以下群组中 @ 当前用户 的消息（群组 username 或 chat_id）
+  # 监听群组：以下群组中 @ 当前用户 或 引用回复 当前用户 的消息（群组 username 或 chat_id）
   groups:
     - "some_group_username"
     # - "-1001234567890"
 
 # 可发送管理命令的私信用户（username 或 user_id）
+# 群消息支持 /id@当前用户 命令，返回当前群 ID
 command:
   users:
     - "your_user_id"
@@ -35,3 +36,4 @@ push:
   method: "POST"          # GET 或 POST
   push_key: "your_push_key"
   type: "text"
+  heartbeat_interval_minutes: 30  # 无推送超过该分钟数后发送心跳

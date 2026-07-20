@@ -30,10 +30,21 @@ def display_name(entity: Any) -> str:
     return str(entity_id) if entity_id is not None else "unknown"
 
 
-def format_message_content(text: str, sender_name: str | None = None) -> str:
-    content = text.strip()
-    if not content:
-        content = "[非文本消息]"
+def format_message_content(
+    text: str | None = None,
+    sender_name: str | None = None,
+    *,
+    message: Any = None,
+    chat: Any = None,
+) -> str:
+    if message is not None:
+        from message_format import format_telegram_message
+
+        content = format_telegram_message(message, chat)
+    else:
+        content = (text or "").strip()
+        if not content:
+            content = "[非文本消息]"
 
     if sender_name:
         return f"{sender_name}: {content}"
@@ -47,6 +58,9 @@ def format_message_date(message_date: datetime | None) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+DEFAULT_HEARTBEAT_INTERVAL_MINUTES = 30
+
+
 class PushClient:
     def __init__(self, config: dict[str, Any]) -> None:
         self.config_enabled = bool(config.get("enabled", True))
@@ -54,7 +68,11 @@ class PushClient:
         self.method = str(config.get("method", "POST")).upper()
         self.push_key = str(config.get("push_key", "")).strip()
         self.msg_type = str(config.get("type", "text"))
+        self.heartbeat_interval_minutes = int(
+            config.get("heartbeat_interval_minutes", DEFAULT_HEARTBEAT_INTERVAL_MINUTES)
+        )
         self.runtime_enabled = True
+        self.last_push_time: datetime | None = None
 
         if self.config_enabled and not self.push_key:
             raise ValueError("push.push_key 未配置")
@@ -72,6 +90,25 @@ class PushClient:
         if not self.config_enabled:
             return "未启用（配置关闭）"
         return "已开启" if self.runtime_enabled else "已关闭"
+
+    def mark_push_sent(self) -> None:
+        self.last_push_time = datetime.now()
+
+    def needs_heartbeat(self) -> bool:
+        if not self.is_active():
+            return False
+        if self.last_push_time is None:
+            return True
+        interval_seconds = self.heartbeat_interval_minutes * 60
+        elapsed = (datetime.now() - self.last_push_time).total_seconds()
+        return elapsed >= interval_seconds
+
+    async def send_heartbeat(self) -> None:
+        await self.send(
+            title="心跳",
+            content="监听服务运行正常",
+            message_date=datetime.now(),
+        )
 
     def _build_payload(
         self,
@@ -119,6 +156,7 @@ class PushClient:
         payload = self._build_payload(title, content, message_date)
         try:
             await asyncio.to_thread(self._send_sync, payload)
+            self.mark_push_sent()
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             logger.error("推送失败 HTTP %s: %s", exc.code, body[:200])

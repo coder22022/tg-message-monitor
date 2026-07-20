@@ -1,5 +1,5 @@
 """
-Telegram 消息监听：私信指定用户、群组 @ 当前用户。
+Telegram 消息监听：私信指定用户、群组 @ 当前用户或引用回复当前用户。
 
 依赖: pip install -r requirements.txt
 用法: python main.py -c config.yaml
@@ -19,6 +19,7 @@ import yaml
 from telethon import TelegramClient, events
 
 from push import PushClient, display_name, format_message_content
+from message_format import format_telegram_message
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 # my.telegram.org 注册失败时可省略配置，使用 Telegram Desktop 公开凭证
 DEFAULT_API_ID = 2040
 DEFAULT_API_HASH = "b18441a1ff607e10a989891a5462e627"
+HEARTBEAT_CHECK_INTERVAL_SECONDS = 60
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -79,6 +81,7 @@ class TgMessageMonitor:
         self.me = None
         self.start_time: datetime | None = None
         self.message_count = 0
+        self._heartbeat_task: asyncio.Task | None = None
 
     def _match_identifier(self, entity: Any, identifiers: set[str]) -> bool:
         if not identifiers or entity is None:
@@ -105,6 +108,18 @@ class TgMessageMonitor:
                 return True
 
         return False
+
+    async def _is_reply_to_me(self, event: events.NewMessage.Event) -> bool:
+        if not self.me or not event.message.is_reply:
+            return False
+
+        reply_msg = await event.get_reply_message()
+        if not reply_msg:
+            return False
+
+        if reply_msg.sender_id == self.me.id:
+            return True
+        return bool(reply_msg.out)
 
     def _build_status(self) -> str:
         uptime_seconds = 0
@@ -136,6 +151,39 @@ class TgMessageMonitor:
             f"已处理消息: {self.message_count}"
         )
 
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(HEARTBEAT_CHECK_INTERVAL_SECONDS)
+                if not self.push_client or not self.push_client.is_active():
+                    continue
+                if self.push_client.needs_heartbeat():
+                    logger.info(
+                        "超过%d分钟未推送，发送心跳消息",
+                        self.push_client.heartbeat_interval_minutes,
+                    )
+                    await self.push_client.send_heartbeat()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("心跳检查失败")
+
+    def _start_heartbeat(self) -> None:
+        if not self.push_client or not self.push_client.is_active():
+            return
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            return
+        if self.push_client.last_push_time is None:
+            self.push_client.mark_push_sent()
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        logger.info("心跳定时任务已启动")
+
+    def _stop_heartbeat(self) -> None:
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            logger.info("心跳定时任务已停止")
+        self._heartbeat_task = None
+
     async def _try_handle_command(
         self,
         event: events.NewMessage.Event,
@@ -150,6 +198,7 @@ class TgMessageMonitor:
                 await event.reply("未配置推送服务")
                 return True
             self.push_client.open_push()
+            self._start_heartbeat()
             logger.info("命令: 推送已开启")
             await event.reply("推送已开启")
             await self.push_client.send(
@@ -164,6 +213,7 @@ class TgMessageMonitor:
                 await event.reply("未配置推送服务")
                 return True
             self.push_client.close_push()
+            self._stop_heartbeat()
             logger.info("命令: 推送已关闭")
             await event.reply("推送已关闭，消息仅打印")
             await self.push_client.send(
@@ -180,8 +230,40 @@ class TgMessageMonitor:
 
         return False
 
+    def _group_id_command(self) -> str | None:
+        if not self.me or not self.me.username:
+            return None
+        return f"/id@{normalize_identifier(self.me.username)}"
+
+    async def _try_handle_group_command(
+        self,
+        event: events.NewMessage.Event,
+        text: str,
+        sender: Any,
+        chat: Any,
+    ) -> bool:
+        if not self.command_users or not self._match_identifier(sender, self.command_users):
+            return False
+
+        id_command = self._group_id_command()
+        if not id_command:
+            return False
+
+        if normalize_command(text) != id_command:
+            return False
+
+        chat_id = getattr(chat, "id", None)
+        if chat_id is None:
+            await event.reply("无法获取群 ID")
+            return True
+
+        logger.info("命令: %s 返回群 ID %s", id_command, chat_id)
+        await event.reply(str(chat_id))
+        return True
+
     async def _handle_private(self, event: events.NewMessage.Event) -> None:
         sender = await event.get_sender()
+        chat = await event.get_chat()
         text = event.message.message or ""
 
         if self.command_users and self._match_identifier(sender, self.command_users):
@@ -195,8 +277,9 @@ class TgMessageMonitor:
             return
 
         sender_name = display_name(sender)
-        content = format_message_content(text)
-        print(f"[私信] 来自 {sender_name}: {text}")
+        display_text = format_telegram_message(event.message, chat)
+        content = format_message_content(message=event.message, chat=chat)
+        print(f"[私信] 来自 {sender_name}: {display_text}")
         self.message_count += 1
         if self.push_client:
             await self.push_client.send(
@@ -206,23 +289,37 @@ class TgMessageMonitor:
             )
 
     async def _handle_group(self, event: events.NewMessage.Event) -> None:
+        chat = await event.get_chat()
+        text = event.message.message or ""
+        sender = await event.get_sender()
+
+        if self.groups and self._match_identifier(chat, self.groups):
+            group_name = display_name(chat)
+            sender_name = display_name(sender)
+            display_text = format_telegram_message(event.message, chat)
+            print(f"[群组] {group_name} | {sender_name}: {display_text}")
+
+        if await self._try_handle_group_command(event, text, sender, chat):
+            return
+
         if not self.groups:
             return
 
-        chat = await event.get_chat()
         if not self._match_identifier(chat, self.groups):
             return
 
-        if not self._is_mentioned(event):
+        mentioned = self._is_mentioned(event)
+        replied_to_me = await self._is_reply_to_me(event)
+        if not mentioned and not replied_to_me:
             return
 
-        text = event.message.message or ""
         group_name = display_name(chat)
-        sender = await event.get_sender()
         sender_name = display_name(sender)
-        content = format_message_content(text, sender_name=sender_name)
-        my_username = f"@{self.me.username}" if self.me and self.me.username else "当前用户"
-        print(f"[群组@{my_username}] {group_name} | {sender_name}: {text}")
+        content = format_message_content(
+            message=event.message,
+            chat=chat,
+            sender_name=sender_name,
+        )
         self.message_count += 1
         if self.push_client:
             await self.push_client.send(
@@ -266,6 +363,7 @@ class TgMessageMonitor:
                 logger.exception("处理消息失败")
 
         logger.info("开始监听，按 Ctrl+C 退出...")
+        self._start_heartbeat()
         await self.client.run_until_disconnected()
 
 
