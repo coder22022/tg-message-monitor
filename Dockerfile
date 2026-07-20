@@ -8,11 +8,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tzdata \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /app/sessions
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py push.py ./
+COPY *.py ./
 
 CMD ["python", "main.py", "-c", "config.yaml"]
