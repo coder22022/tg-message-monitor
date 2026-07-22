@@ -25,6 +25,7 @@ monitor:
 
 # 可发送管理命令的私信用户（username 或 user_id）
 # 群消息支持 /id@当前用户 命令，返回当前群 ID
+# 私信命令: /open push /close push /open duty /close duty /status
 command:
   users:
     - "your_user_id"
@@ -42,3 +43,8 @@ push:
       end: "09:00"
     # - start: "12:00"
     #   end: "13:00"
+  work_hours:                      # 上班时段，支持多个；该时段内群消息全量推送
+    - start: "09:00"
+      end: "18:00"
+    # - start: "14:00"
+    #   end: "17:00"

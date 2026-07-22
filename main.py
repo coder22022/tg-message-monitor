@@ -137,23 +137,28 @@ class TgMessageMonitor:
             account = "未知"
 
         push_status = self.push_client.status_text() if self.push_client else "未配置"
-        quiet_hours = (
-            self.push_client.quiet_hours_text() if self.push_client else "未配置"
+        push_details = (
+            self.push_client.build_status_lines() if self.push_client else []
         )
         connection = "已连接" if self.client.is_connected() else "未连接"
 
-        return (
-            "系统状态\n"
-            f"连接: {connection}\n"
-            f"账号: {account}\n"
-            f"推送: {push_status}\n"
-            f"免打扰: {quiet_hours}\n"
-            f"监听私信用户: {len(self.private_users)}\n"
-            f"监听群组: {len(self.groups)}\n"
-            f"命令用户: {len(self.command_users)}\n"
-            f"运行时长: {hours}小时{minutes}分{seconds}秒\n"
-            f"已处理消息: {self.message_count}"
+        lines = [
+            "系统状态",
+            f"连接: {connection}",
+            f"账号: {account}",
+            f"推送: {push_status}",
+        ]
+        lines.extend(push_details)
+        lines.extend(
+            [
+                f"监听私信用户: {len(self.private_users)}",
+                f"监听群组: {len(self.groups)}",
+                f"命令用户: {len(self.command_users)}",
+                f"运行时长: {hours}小时{minutes}分{seconds}秒",
+                f"已处理消息: {self.message_count}",
+            ]
         )
+        return "\n".join(lines)
 
     async def _heartbeat_loop(self) -> None:
         while True:
@@ -225,6 +230,35 @@ class TgMessageMonitor:
                 content=f"{sender_name} 执行 /close push，推送已关闭",
                 message_date=event.message.date,
                 force=True,
+            )
+            return True
+
+        if command == "/open duty":
+            if not self.push_client:
+                await event.reply("未配置推送服务")
+                return True
+            self.push_client.open_duty()
+            self._start_heartbeat()
+            logger.info("命令: 值班模式已开启")
+            await event.reply("值班模式已开启（推送已开启，群消息全量推送）")
+            await self.push_client.send(
+                title=sender_name,
+                content=f"{sender_name} 执行 /open duty，值班模式已开启",
+                message_date=event.message.date,
+            )
+            return True
+
+        if command == "/close duty":
+            if not self.push_client:
+                await event.reply("未配置推送服务")
+                return True
+            self.push_client.close_duty()
+            logger.info("命令: 值班模式已关闭")
+            await event.reply("值班模式已关闭（推送保持当前状态）")
+            await self.push_client.send(
+                title=sender_name,
+                content=f"{sender_name} 执行 /close duty，值班模式已关闭",
+                message_date=event.message.date,
             )
             return True
 
@@ -314,7 +348,10 @@ class TgMessageMonitor:
 
         mentioned = self._is_mentioned(event)
         replied_to_me = await self._is_reply_to_me(event)
-        if not mentioned and not replied_to_me:
+        should_push = mentioned or replied_to_me
+        if self.push_client:
+            should_push = self.push_client.should_notify_group(mentioned, replied_to_me)
+        if not should_push:
             return
 
         group_name = display_name(chat)

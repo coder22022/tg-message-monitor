@@ -50,7 +50,12 @@ push:
   method: "POST"          # GET 或 POST
   push_key: "LSYRWWamS79qnttRqpTp"
   type: "text"
-  heartbeat_interval_minutes: 30
+  heartbeat_interval_minutes: 10
   quiet_hours:
     - start: "23:00"
       end: "09:00"
+  work_hours:
+    - start: "09:30"
+      end: "11:00"
+    - start: "13:30"
+      end: "16:00"
