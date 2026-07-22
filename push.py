@@ -146,6 +146,9 @@ class PushClient:
     def is_active(self) -> bool:
         return self.config_enabled and self.runtime_enabled
 
+    def can_update_activity(self, moment: datetime | None = None) -> bool:
+        return self.is_active() and not self.is_quiet_hours(moment)
+
     def is_quiet_hours(self, moment: datetime | None = None) -> bool:
         if not self.quiet_periods:
             return False

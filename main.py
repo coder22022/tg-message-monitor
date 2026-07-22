@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import random
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -183,6 +184,21 @@ class TgMessageMonitor:
         if not self.group_targets:
             return
 
+        if not self.push_client:
+            logger.info("群组浏览: 未配置推送，跳过活跃更新")
+            return
+
+        if not self.push_client.can_update_activity():
+            if not self.push_client.is_active():
+                logger.info("群组浏览: 推送未开启，跳过活跃更新")
+            else:
+                logger.info("群组浏览: 免打扰时段，跳过活跃更新")
+            return
+
+        if random.random() >= 0.5:
+            logger.info("群组浏览: 随机跳过本次活跃更新")
+            return
+
         logger.info("开始浏览群组，共 %d 个", len(self.group_targets))
         for group_ref in self.group_targets:
             try:
@@ -225,7 +241,23 @@ class TgMessageMonitor:
             return "已关闭"
         if not self.group_targets:
             return "未配置监听群组"
-        return f"每 {self.group_browse_interval_minutes} 分钟浏览 {len(self.group_targets)} 个群，每次 {self.group_browse_message_limit} 条"
+
+        base = (
+            f"每 {self.group_browse_interval_minutes} 分钟浏览 "
+            f"{len(self.group_targets)} 个群，每次 {self.group_browse_message_limit} 条"
+        )
+        if not self.push_client:
+            return f"{base}（需配置推送）"
+
+        if not self.push_client.can_update_activity():
+            reasons: list[str] = []
+            if not self.push_client.is_active():
+                reasons.append("推送关闭")
+            if self.push_client.is_quiet_hours():
+                reasons.append("免打扰中")
+            return f"{base}（当前暂停：{'、'.join(reasons)}）"
+
+        return f"{base}（推送开启，50% 概率执行）"
 
     def _build_status(self) -> str:
         uptime_seconds = 0
