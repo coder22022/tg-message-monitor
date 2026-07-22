@@ -22,6 +22,8 @@ monitor:
   groups:
     - "some_group_username"
     # - "-1001234567890"
+  group_browse_interval_minutes: 20  # 定时浏览群组间隔（分钟），0 表示关闭
+  group_browse_message_limit: 5       # 每次浏览读取的消息条数
 
 # 可发送管理命令的私信用户（username 或 user_id）
 # 群消息支持 /id@当前用户 命令，返回当前群 ID

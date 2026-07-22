@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 from telethon import TelegramClient, events
+from telethon.tl.functions.messages import GetPeerDialogsRequest
 
 from push import PushClient, display_name, format_message_content
 from message_format import format_telegram_message
@@ -31,6 +32,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_API_ID = 2040
 DEFAULT_API_HASH = "b18441a1ff607e10a989891a5462e627"
 HEARTBEAT_CHECK_INTERVAL_SECONDS = 60
+DEFAULT_GROUP_BROWSE_INTERVAL_MINUTES = 20
+DEFAULT_GROUP_BROWSE_MESSAGE_LIMIT = 5
+GROUP_BROWSE_DELAY_SECONDS = 1
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -68,6 +72,19 @@ class TgMessageMonitor:
             normalize_identifier(u) for u in monitor.get("private_users", [])
         }
         self.groups = {normalize_identifier(g) for g in monitor.get("groups", [])}
+        self.group_targets = list(monitor.get("groups", []))
+        self.group_browse_interval_minutes = int(
+            monitor.get(
+                "group_browse_interval_minutes",
+                DEFAULT_GROUP_BROWSE_INTERVAL_MINUTES,
+            )
+        )
+        self.group_browse_message_limit = int(
+            monitor.get(
+                "group_browse_message_limit",
+                DEFAULT_GROUP_BROWSE_MESSAGE_LIMIT,
+            )
+        )
 
         command_cfg = config.get("command", {})
         self.command_users = {
@@ -82,6 +99,7 @@ class TgMessageMonitor:
         self.start_time: datetime | None = None
         self.message_count = 0
         self._heartbeat_task: asyncio.Task | None = None
+        self._group_browse_task: asyncio.Task | None = None
 
     def _match_identifier(self, entity: Any, identifiers: set[str]) -> bool:
         if not identifiers or entity is None:
@@ -121,6 +139,94 @@ class TgMessageMonitor:
             return True
         return bool(reply_msg.out)
 
+    def _resolve_group_ref(self, group_ref: str | int) -> str | int:
+        if isinstance(group_ref, int):
+            return group_ref
+        value = str(group_ref).strip()
+        if value.lstrip("-").isdigit():
+            return int(value)
+        return value.lstrip("@")
+
+    async def _get_read_inbox_max_id(self, entity: Any) -> int:
+        input_peer = await self.client.get_input_entity(entity)
+        result = await self.client(GetPeerDialogsRequest(peers=[input_peer]))
+        if not result.dialogs:
+            return 0
+        return int(result.dialogs[0].read_inbox_max_id or 0)
+
+    async def _browse_group(self, group_ref: str | int) -> None:
+        entity = await self.client.get_entity(self._resolve_group_ref(group_ref))
+        group_name = display_name(entity)
+        read_inbox_max_id = await self._get_read_inbox_max_id(entity)
+
+        limit = max(1, self.group_browse_message_limit)
+        messages = await self.client.get_messages(entity, limit=limit)
+        if not messages:
+            logger.info("群组浏览: %s (无消息)", group_name)
+            return
+
+        max_message_id = max(message.id for message in messages)
+        if max_message_id > read_inbox_max_id:
+            await self.client.send_read_acknowledge(entity, max_id=max_message_id)
+            ack_text = f"已读确认至 {max_message_id}"
+        else:
+            ack_text = f"已全部已读(≤{read_inbox_max_id})，跳过已读确认"
+
+        logger.info(
+            "群组浏览: %s，读取 %d 条，%s",
+            group_name,
+            len(messages),
+            ack_text,
+        )
+
+    async def _browse_groups_once(self) -> None:
+        if not self.group_targets:
+            return
+
+        logger.info("开始浏览群组，共 %d 个", len(self.group_targets))
+        for group_ref in self.group_targets:
+            try:
+                await self._browse_group(group_ref)
+            except Exception:
+                logger.exception("群组浏览失败: %s", group_ref)
+            await asyncio.sleep(GROUP_BROWSE_DELAY_SECONDS)
+
+    async def _group_browse_loop(self) -> None:
+        interval_seconds = self.group_browse_interval_minutes * 60
+        while True:
+            try:
+                await self._browse_groups_once()
+                await asyncio.sleep(interval_seconds)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("群组浏览任务失败")
+                await asyncio.sleep(interval_seconds)
+
+    def _start_group_browse(self) -> None:
+        if self.group_browse_interval_minutes <= 0 or not self.group_targets:
+            return
+        if self._group_browse_task and not self._group_browse_task.done():
+            return
+        self._group_browse_task = asyncio.create_task(self._group_browse_loop())
+        logger.info(
+            "群组浏览定时任务已启动，间隔 %d 分钟",
+            self.group_browse_interval_minutes,
+        )
+
+    def _stop_group_browse(self) -> None:
+        if self._group_browse_task and not self._group_browse_task.done():
+            self._group_browse_task.cancel()
+            logger.info("群组浏览定时任务已停止")
+        self._group_browse_task = None
+
+    def _group_browse_status_text(self) -> str:
+        if self.group_browse_interval_minutes <= 0:
+            return "已关闭"
+        if not self.group_targets:
+            return "未配置监听群组"
+        return f"每 {self.group_browse_interval_minutes} 分钟浏览 {len(self.group_targets)} 个群，每次 {self.group_browse_message_limit} 条"
+
     def _build_status(self) -> str:
         uptime_seconds = 0
         if self.start_time:
@@ -153,6 +259,7 @@ class TgMessageMonitor:
             [
                 f"监听私信用户: {len(self.private_users)}",
                 f"监听群组: {len(self.groups)}",
+                f"群组浏览: {self._group_browse_status_text()}",
                 f"命令用户: {len(self.command_users)}",
                 f"运行时长: {hours}小时{minutes}分{seconds}秒",
                 f"已处理消息: {self.message_count}",
@@ -390,10 +497,11 @@ class TgMessageMonitor:
         username = f"@{self.me.username}" if self.me.username else str(self.me.id)
         logger.info("已登录: %s (%s)", self.me.first_name, username)
         logger.info(
-            "监听配置 - 私信用户: %s, 群组: %s, 命令用户: %s",
+            "监听配置 - 私信用户: %s, 群组: %s, 命令用户: %s, 群组浏览间隔: %s分钟",
             len(self.private_users),
             len(self.groups),
             len(self.command_users),
+            self.group_browse_interval_minutes,
         )
 
         @self.client.on(events.NewMessage)
@@ -405,6 +513,7 @@ class TgMessageMonitor:
 
         logger.info("开始监听，按 Ctrl+C 退出...")
         self._start_heartbeat()
+        self._start_group_browse()
         await self.client.run_until_disconnected()
 
 
