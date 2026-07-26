@@ -50,10 +50,8 @@ command:
 
 push:
   enabled: true
-  url: "https://push.i-i.me"
-  method: "POST"          # GET 或 POST
-  push_key: "LSYRWWamS79qnttRqpTp"
-  type: "text"
+  url: "https://api.day.app"
+  device_key: "KFP9bdarh5YM9ZQMMVrTeB"
   heartbeat_interval_minutes: 10
   quiet_hours:
     - start: "23:00"

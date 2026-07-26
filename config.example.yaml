@@ -35,10 +35,8 @@ command:
 
 push:
   enabled: true
-  url: "https://push.i-i.me"
-  method: "POST"          # GET 或 POST
-  push_key: "your_push_key"
-  type: "text"
+  url: "https://api.day.app"
+  device_key: "your_bark_device_key"
   heartbeat_interval_minutes: 30  # 无推送超过该分钟数后发送心跳
   quiet_hours:                     # 免打扰时段，支持多个；跨天写法如 23:00-09:00
     - start: "23:00"

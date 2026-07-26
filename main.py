@@ -47,6 +47,36 @@ def normalize_identifier(value: str | int) -> str:
     return str(value).lstrip("@").lower()
 
 
+def chat_id_variants(value: str | int) -> set[str]:
+    """Telegram 超级群组 ID 的多种写法：4215609865 与 -1004215609865。"""
+    text = str(value).strip()
+    if not text.lstrip("-").isdigit():
+        return {normalize_identifier(text)}
+
+    num = int(text)
+    variants = {str(num)}
+    if num > 0:
+        variants.add(f"-100{num}")
+    elif text.startswith("-100"):
+        variants.add(text[4:])
+    return {normalize_identifier(item) for item in variants}
+
+
+def resolve_group_ref(group_ref: str | int) -> str | int:
+    if isinstance(group_ref, int):
+        num = group_ref
+    else:
+        value = str(group_ref).strip()
+        if value.lstrip("-").isdigit():
+            num = int(value)
+        else:
+            return value.lstrip("@")
+
+    if num < 0:
+        return num
+    return int(f"-100{num}")
+
+
 def normalize_command(text: str) -> str:
     return " ".join(text.strip().lower().split())
 
@@ -72,7 +102,11 @@ class TgMessageMonitor:
         self.private_users = {
             normalize_identifier(u) for u in monitor.get("private_users", [])
         }
-        self.groups = {normalize_identifier(g) for g in monitor.get("groups", [])}
+        self.groups = {
+            variant
+            for group in monitor.get("groups", [])
+            for variant in chat_id_variants(group)
+        }
         self.group_targets = list(monitor.get("groups", []))
         self.group_browse_interval_minutes = int(
             monitor.get(
@@ -109,7 +143,7 @@ class TgMessageMonitor:
         candidates: set[str] = set()
         entity_id = getattr(entity, "id", None)
         if entity_id is not None:
-            candidates.add(str(entity_id))
+            candidates.update(chat_id_variants(entity_id))
         username = getattr(entity, "username", None)
         if username:
             candidates.add(normalize_identifier(username))
@@ -140,14 +174,6 @@ class TgMessageMonitor:
             return True
         return bool(reply_msg.out)
 
-    def _resolve_group_ref(self, group_ref: str | int) -> str | int:
-        if isinstance(group_ref, int):
-            return group_ref
-        value = str(group_ref).strip()
-        if value.lstrip("-").isdigit():
-            return int(value)
-        return value.lstrip("@")
-
     async def _get_read_inbox_max_id(self, entity: Any) -> int:
         input_peer = await self.client.get_input_entity(entity)
         result = await self.client(GetPeerDialogsRequest(peers=[input_peer]))
@@ -156,7 +182,7 @@ class TgMessageMonitor:
         return int(result.dialogs[0].read_inbox_max_id or 0)
 
     async def _browse_group(self, group_ref: str | int) -> None:
-        entity = await self.client.get_entity(self._resolve_group_ref(group_ref))
+        entity = await self.client.get_entity(resolve_group_ref(group_ref))
         group_name = display_name(entity)
         read_inbox_max_id = await self._get_read_inbox_max_id(entity)
 
@@ -495,15 +521,11 @@ class TgMessageMonitor:
 
         group_name = display_name(chat)
         sender_name = display_name(sender)
-        content = format_message_content(
-            message=event.message,
-            chat=chat,
-            sender_name=sender_name,
-        )
+        content = format_message_content(message=event.message, chat=chat)
         self.message_count += 1
         if self.push_client:
             await self.push_client.send(
-                title=group_name,
+                title=f"{group_name}+{sender_name}",
                 content=content,
                 message_date=event.message.date,
             )
