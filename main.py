@@ -36,6 +36,9 @@ HEARTBEAT_CHECK_INTERVAL_SECONDS = 60
 DEFAULT_GROUP_BROWSE_INTERVAL_MINUTES = 20
 DEFAULT_GROUP_BROWSE_MESSAGE_LIMIT = 5
 GROUP_BROWSE_DELAY_SECONDS = 1
+GROUP_BROWSE_PROBABILITY_DUTY = 1 / 19
+GROUP_BROWSE_PROBABILITY_WORK = 1 / 3
+GROUP_BROWSE_PROBABILITY_DEFAULT = 1 / 29
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -206,6 +209,24 @@ class TgMessageMonitor:
             ack_text,
         )
 
+    def _group_browse_probability(self) -> float:
+        if not self.push_client:
+            return 0.0
+        if self.push_client.duty_mode:
+            return GROUP_BROWSE_PROBABILITY_DUTY
+        if self.push_client.is_work_hours():
+            return GROUP_BROWSE_PROBABILITY_WORK
+        return GROUP_BROWSE_PROBABILITY_DEFAULT
+
+    def _group_browse_probability_text(self) -> str:
+        if not self.push_client:
+            return "未配置"
+        if self.push_client.duty_mode:
+            return "1/19"
+        if self.push_client.is_work_hours():
+            return "1/3"
+        return "1/29"
+
     async def _browse_groups_once(self) -> None:
         if not self.group_targets:
             return
@@ -221,8 +242,12 @@ class TgMessageMonitor:
                 logger.info("群组浏览: 免打扰时段，跳过活跃更新")
             return
 
-        if random.random() >= 0.5:
-            logger.info("群组浏览: 随机跳过本次活跃更新")
+        probability = self._group_browse_probability()
+        if random.random() >= probability:
+            logger.info(
+                "群组浏览: 随机跳过本次活跃更新 (概率 %s)",
+                self._group_browse_probability_text(),
+            )
             return
 
         logger.info("开始浏览群组，共 %d 个", len(self.group_targets))
@@ -283,7 +308,7 @@ class TgMessageMonitor:
                 reasons.append("免打扰中")
             return f"{base}（当前暂停：{'、'.join(reasons)}）"
 
-        return f"{base}（推送开启，50% 概率执行）"
+        return f"{base}（推送开启，{self._group_browse_probability_text()} 概率执行）"
 
     def _build_status(self) -> str:
         uptime_seconds = 0

@@ -40,7 +40,7 @@ monitor:
     - "5509798997"
     # "技术处理集中提醒"
     - "5135511617"
-  group_browse_interval_minutes: 17
+  group_browse_interval_minutes: 3
   group_browse_message_limit: 15
 
 # 可发送管理命令的私信用户（username 或 user_id）
