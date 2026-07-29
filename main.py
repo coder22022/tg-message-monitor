@@ -331,14 +331,23 @@ class TgMessageMonitor:
                 logger.info("群组浏览: 免打扰时段，跳过活跃更新")
             return
 
-        probability = self._group_browse_probability()
-        if random.random() >= probability:
+        probability, prob_text = self._current_group_browse_probability()
+        roll = random.random()
+        if roll >= probability:
             logger.info(
-                "群组浏览: 随机跳过本次活跃更新 (概率 %s)",
-                self._group_browse_probability_text(),
+                "群组浏览: 随机跳过本次活跃更新 (roll=%.3f >= 阈值 %s / %.0f%%)",
+                roll,
+                prob_text,
+                probability * 100,
             )
             return
 
+        logger.info(
+            "群组浏览: 随机命中活跃更新 (roll=%.3f < 阈值 %s / %.0f%%)",
+            roll,
+            prob_text,
+            probability * 100,
+        )
         logger.info("开始浏览群组，共 %d 个", len(self.group_targets))
         for group_ref in self.group_targets:
             try:
@@ -365,9 +374,14 @@ class TgMessageMonitor:
         if self._group_browse_task and not self._group_browse_task.done():
             return
         self._group_browse_task = asyncio.create_task(self._group_browse_loop())
+        prob_summary = ", ".join(
+            f"{key}={label}({prob:.0%})"
+            for key, (prob, label) in self.group_browse_probabilities.items()
+        )
         logger.info(
-            "群组浏览定时任务已启动，间隔 %d 分钟",
+            "群组浏览定时任务已启动，间隔 %d 分钟，概率 %s",
             self.group_browse_interval_minutes,
+            prob_summary,
         )
 
     def _stop_group_browse(self) -> None:

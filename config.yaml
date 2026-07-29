@@ -42,7 +42,7 @@ monitor:
     - "5135511617"
   group_browse_interval_minutes: 3
   group_browse_message_limit: 15
-  group_browse_probability:        # 活跃更新执行概率，支持分数(1/19)或小数(0.05)
+  group_browse_probability:        # 每轮定时任务的执行概率（非每个群），支持分数(1/2)或小数(0.5)
     duty: "1/10"                  # 值班模式
     work: "1/2"                   # 上班时间
     default: "1/20"                # 其他时段
