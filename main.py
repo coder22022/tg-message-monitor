@@ -136,6 +136,7 @@ class TgMessageMonitor:
         self.start_time: datetime | None = None
         self.message_count = 0
         self._group_browse_task: asyncio.Task | None = None
+        self._group_entity_cache: dict[str, Any] = {}
 
     def _match_identifier(self, entity: Any, identifiers: set[str]) -> bool:
         if not identifiers or entity is None:
@@ -182,8 +183,59 @@ class TgMessageMonitor:
             return 0
         return int(result.dialogs[0].read_inbox_max_id or 0)
 
+    def _group_cache_key(self, group_ref: str | int) -> str:
+        return normalize_identifier(str(group_ref).strip())
+
+    async def _resolve_group_entity(self, group_ref: str | int) -> Any:
+        """解析群组实体；Telethon 需先在会话中见过该群才能仅凭 ID lookup。"""
+        cache_key = self._group_cache_key(group_ref)
+        cached = self._group_entity_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        target_variants = chat_id_variants(group_ref)
+        try:
+            entity = await self.client.get_entity(resolve_group_ref(group_ref))
+            self._group_entity_cache[cache_key] = entity
+            return entity
+        except ValueError:
+            pass
+
+        async for dialog in self.client.iter_dialogs():
+            entity = dialog.entity
+            entity_id = getattr(entity, "id", None)
+            if entity_id is not None and chat_id_variants(entity_id) & target_variants:
+                self._group_entity_cache[cache_key] = entity
+                return entity
+            username = getattr(entity, "username", None)
+            if username and normalize_identifier(username) in target_variants:
+                self._group_entity_cache[cache_key] = entity
+                return entity
+
+        raise ValueError(
+            f"无法解析群组 {group_ref}，请确认账号已加入该群且曾在客户端中打开过"
+        )
+
+    async def _warm_group_entity_cache(self) -> None:
+        if not self.group_targets:
+            return
+
+        unresolved: list[str] = []
+        for group_ref in self.group_targets:
+            try:
+                entity = await self._resolve_group_entity(group_ref)
+                logger.info("群组实体已缓存: %s", display_name(entity))
+            except ValueError:
+                unresolved.append(str(group_ref))
+
+        if unresolved:
+            logger.warning(
+                "以下群组无法解析实体，群组浏览将跳过: %s",
+                ", ".join(unresolved),
+            )
+
     async def _browse_group(self, group_ref: str | int) -> None:
-        entity = await self.client.get_entity(resolve_group_ref(group_ref))
+        entity = await self._resolve_group_entity(group_ref)
         group_name = display_name(entity)
         read_inbox_max_id = await self._get_read_inbox_max_id(entity)
 
@@ -564,6 +616,7 @@ class TgMessageMonitor:
                 logger.exception("处理消息失败")
 
         logger.info("开始监听，按 Ctrl+C 退出...")
+        await self._warm_group_entity_cache()
         self._start_group_browse()
         await self.client.run_until_disconnected()
 
