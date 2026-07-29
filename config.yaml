@@ -52,7 +52,7 @@ push:
   enabled: true
   url: "https://api.day.app"
   device_key: "KFP9bdarh5YM9ZQMMVrTeB"
-  heartbeat_interval_minutes: 10
+  group_broadcast_push_limit_per_minute: 3  # 非 @/引用 的群消息每分钟最多推送条数，0 表示不限制
   quiet_hours:
     - start: "23:00"
       end: "09:00"

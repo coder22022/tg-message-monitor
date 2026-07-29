@@ -37,7 +37,7 @@ push:
   enabled: true
   url: "https://api.day.app"
   device_key: "your_bark_device_key"
-  heartbeat_interval_minutes: 30  # 无推送超过该分钟数后发送心跳
+  group_broadcast_push_limit_per_minute: 10  # 非 @/引用 的群消息每分钟最多推送条数，0 表示不限制
   quiet_hours:                     # 免打扰时段，支持多个；跨天写法如 23:00-09:00
     - start: "23:00"
       end: "09:00"

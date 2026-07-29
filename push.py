@@ -6,13 +6,14 @@ import socket
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import deque
 from datetime import datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_HEARTBEAT_INTERVAL_MINUTES = 30
 DEFAULT_PUSH_TIMEOUT_SECONDS = 15
+DEFAULT_GROUP_BROADCAST_PUSH_LIMIT_PER_MINUTE = 0
 
 
 def display_name(entity: Any) -> str:
@@ -144,17 +145,20 @@ class PushClient:
         self.device_key = str(
             config.get("device_key") or config.get("push_key", "")
         ).strip()
-        self.heartbeat_interval_minutes = int(
-            config.get("heartbeat_interval_minutes", DEFAULT_HEARTBEAT_INTERVAL_MINUTES)
-        )
         self.quiet_periods = parse_quiet_periods(config.get("quiet_hours"))
         self.work_periods = parse_time_periods(config.get("work_hours"), "work_hours")
         self.request_timeout = int(
             config.get("timeout", DEFAULT_PUSH_TIMEOUT_SECONDS)
         )
+        self.group_broadcast_push_limit_per_minute = int(
+            config.get(
+                "group_broadcast_push_limit_per_minute",
+                DEFAULT_GROUP_BROADCAST_PUSH_LIMIT_PER_MINUTE,
+            )
+        )
         self.runtime_enabled = True
         self.duty_mode = False
-        self.last_push_time: datetime | None = None
+        self._group_broadcast_push_times: deque[datetime] = deque()
 
         if self.config_enabled and not self.device_key:
             raise ValueError("push.device_key 未配置")
@@ -199,6 +203,36 @@ class PushClient:
             return True
         return False
 
+    def _prune_group_broadcast_push_times(self, moment: datetime) -> None:
+        cutoff = moment.timestamp() - 60
+        while (
+            self._group_broadcast_push_times
+            and self._group_broadcast_push_times[0].timestamp() <= cutoff
+        ):
+            self._group_broadcast_push_times.popleft()
+
+    def is_group_broadcast_rate_limited(self, moment: datetime | None = None) -> bool:
+        limit = self.group_broadcast_push_limit_per_minute
+        if limit <= 0:
+            return False
+        now = moment or datetime.now()
+        self._prune_group_broadcast_push_times(now)
+        return len(self._group_broadcast_push_times) >= limit
+
+    def record_group_broadcast_push(self, moment: datetime | None = None) -> None:
+        if self.group_broadcast_push_limit_per_minute <= 0:
+            return
+        self._group_broadcast_push_times.append(moment or datetime.now())
+
+    def group_broadcast_rate_limit_text(self) -> str:
+        limit = self.group_broadcast_push_limit_per_minute
+        if limit <= 0:
+            return "未限制"
+        now = datetime.now()
+        self._prune_group_broadcast_push_times(now)
+        used = len(self._group_broadcast_push_times)
+        return f"{used}/{limit} 条/分钟"
+
     def _periods_text(self, periods: list[TimePeriod], active: bool) -> str:
         if not periods:
             return "未配置"
@@ -239,26 +273,8 @@ class PushClient:
             f"值班模式: {self.duty_mode_text()}",
             f"上班时间: {self.work_hours_text()}",
             f"群组推送策略: {self.group_push_policy_text()}",
+            f"群广播限流: {self.group_broadcast_rate_limit_text()}",
         ]
-
-    def mark_push_sent(self) -> None:
-        self.last_push_time = datetime.now()
-
-    def needs_heartbeat(self) -> bool:
-        if not self.is_active() or self.is_quiet_hours():
-            return False
-        if self.last_push_time is None:
-            return True
-        interval_seconds = self.heartbeat_interval_minutes * 60
-        elapsed = (datetime.now() - self.last_push_time).total_seconds()
-        return elapsed >= interval_seconds
-
-    async def send_heartbeat(self) -> None:
-        await self.send(
-            title="心跳",
-            content="监听服务运行正常",
-            message_date=datetime.now(),
-        )
 
     def _build_bark_url(self, title: str, content: str) -> str:
         encoded_title = urllib.parse.quote(title, safe="")
@@ -333,6 +349,5 @@ class PushClient:
         logger.info("推送请求:\n%s", request_log)
         try:
             await asyncio.to_thread(self._send_sync, url)
-            self.mark_push_sent()
         except Exception as exc:
             self._log_push_failure(request_log, exc)

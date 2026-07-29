@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
 # my.telegram.org 注册失败时可省略配置，使用 Telegram Desktop 公开凭证
 DEFAULT_API_ID = 2040
 DEFAULT_API_HASH = "b18441a1ff607e10a989891a5462e627"
-HEARTBEAT_CHECK_INTERVAL_SECONDS = 60
 DEFAULT_GROUP_BROWSE_INTERVAL_MINUTES = 20
 DEFAULT_GROUP_BROWSE_MESSAGE_LIMIT = 5
 GROUP_BROWSE_DELAY_SECONDS = 1
@@ -136,7 +135,6 @@ class TgMessageMonitor:
         self.me = None
         self.start_time: datetime | None = None
         self.message_count = 0
-        self._heartbeat_task: asyncio.Task | None = None
         self._group_browse_task: asyncio.Task | None = None
 
     def _match_identifier(self, entity: Any, identifiers: set[str]) -> bool:
@@ -350,39 +348,6 @@ class TgMessageMonitor:
         )
         return "\n".join(lines)
 
-    async def _heartbeat_loop(self) -> None:
-        while True:
-            try:
-                await asyncio.sleep(HEARTBEAT_CHECK_INTERVAL_SECONDS)
-                if not self.push_client or not self.push_client.is_active():
-                    continue
-                if self.push_client.needs_heartbeat():
-                    logger.info(
-                        "超过%d分钟未推送，发送心跳消息",
-                        self.push_client.heartbeat_interval_minutes,
-                    )
-                    await self.push_client.send_heartbeat()
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                logger.exception("心跳检查失败")
-
-    def _start_heartbeat(self) -> None:
-        if not self.push_client or not self.push_client.is_active():
-            return
-        if self._heartbeat_task and not self._heartbeat_task.done():
-            return
-        if self.push_client.last_push_time is None:
-            self.push_client.mark_push_sent()
-        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-        logger.info("心跳定时任务已启动")
-
-    def _stop_heartbeat(self) -> None:
-        if self._heartbeat_task and not self._heartbeat_task.done():
-            self._heartbeat_task.cancel()
-            logger.info("心跳定时任务已停止")
-        self._heartbeat_task = None
-
     async def _try_handle_command(
         self,
         event: events.NewMessage.Event,
@@ -397,7 +362,6 @@ class TgMessageMonitor:
                 await event.reply("未配置推送服务")
                 return True
             self.push_client.open_push()
-            self._start_heartbeat()
             logger.info("命令: 推送已开启")
             await event.reply("推送已开启")
             await self.push_client.send(
@@ -412,7 +376,6 @@ class TgMessageMonitor:
                 await event.reply("未配置推送服务")
                 return True
             self.push_client.close_push()
-            self._stop_heartbeat()
             logger.info("命令: 推送已关闭")
             await event.reply("推送已关闭，消息仅打印")
             await self.push_client.send(
@@ -428,7 +391,6 @@ class TgMessageMonitor:
                 await event.reply("未配置推送服务")
                 return True
             self.push_client.open_duty()
-            self._start_heartbeat()
             logger.info("命令: 值班模式已开启")
             await event.reply("值班模式已开启（推送已开启，群消息全量推送）")
             await self.push_client.send(
@@ -544,11 +506,22 @@ class TgMessageMonitor:
         if not should_push:
             return
 
+        is_priority = mentioned or replied_to_me
+        if self.push_client and not is_priority:
+            if self.push_client.is_group_broadcast_rate_limited():
+                logger.info(
+                    "群组广播推送已达每分钟上限 (%d)，跳过",
+                    self.push_client.group_broadcast_push_limit_per_minute,
+                )
+                return
+
         group_name = display_name(chat)
         sender_name = display_name(sender)
         content = format_message_content(message=event.message, chat=chat)
         self.message_count += 1
         if self.push_client:
+            if not is_priority:
+                self.push_client.record_group_broadcast_push()
             await self.push_client.send(
                 title=f"{group_name}+{sender_name}",
                 content=content,
@@ -591,7 +564,6 @@ class TgMessageMonitor:
                 logger.exception("处理消息失败")
 
         logger.info("开始监听，按 Ctrl+C 退出...")
-        self._start_heartbeat()
         self._start_group_browse()
         await self.client.run_until_disconnected()
 
