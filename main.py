@@ -35,9 +35,37 @@ DEFAULT_API_HASH = "b18441a1ff607e10a989891a5462e627"
 DEFAULT_GROUP_BROWSE_INTERVAL_MINUTES = 20
 DEFAULT_GROUP_BROWSE_MESSAGE_LIMIT = 5
 GROUP_BROWSE_DELAY_SECONDS = 1
-GROUP_BROWSE_PROBABILITY_DUTY = 1 / 19
-GROUP_BROWSE_PROBABILITY_WORK = 1 / 3
-GROUP_BROWSE_PROBABILITY_DEFAULT = 1 / 29
+DEFAULT_GROUP_BROWSE_PROBABILITY = {
+    "duty": (1 / 19, "1/19"),
+    "work": (1 / 3, "1/3"),
+    "default": (1 / 29, "1/29"),
+}
+
+
+def parse_probability(value: Any, default: float) -> float:
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        prob = float(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if "/" in text:
+            numerator, denominator = text.split("/", 1)
+            prob = float(numerator.strip()) / float(denominator.strip())
+        else:
+            prob = float(text)
+    else:
+        raise ValueError(f"概率配置格式无效: {value!r}")
+
+    if not 0 <= prob <= 1:
+        raise ValueError(f"概率需在 0~1 之间: {value!r}")
+    return prob
+
+
+def probability_label(value: Any, prob: float, default_label: str) -> str:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return default_label
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -122,6 +150,13 @@ class TgMessageMonitor:
                 DEFAULT_GROUP_BROWSE_MESSAGE_LIMIT,
             )
         )
+        prob_cfg = monitor.get("group_browse_probability") or {}
+        self.group_browse_probabilities: dict[str, tuple[float, str]] = {}
+        for key, (default_prob, default_label) in DEFAULT_GROUP_BROWSE_PROBABILITY.items():
+            raw = prob_cfg.get(key)
+            prob = parse_probability(raw, default_prob)
+            label = probability_label(raw, prob, default_label)
+            self.group_browse_probabilities[key] = (prob, label)
 
         command_cfg = config.get("command", {})
         self.command_users = {
@@ -242,15 +277,22 @@ class TgMessageMonitor:
         limit = max(1, self.group_browse_message_limit)
         messages = await self.client.get_messages(entity, limit=limit)
         if not messages:
-            logger.info("群组浏览: %s (无消息)", group_name)
+            if read_inbox_max_id > 0:
+                await self.client.send_read_acknowledge(
+                    entity, max_id=read_inbox_max_id
+                )
+                logger.info("群组浏览: %s (无消息)，已更新活跃", group_name)
+            else:
+                logger.info("群组浏览: %s (无消息)", group_name)
             return
 
         max_message_id = max(message.id for message in messages)
+        ack_max_id = max(max_message_id, read_inbox_max_id)
+        await self.client.send_read_acknowledge(entity, max_id=ack_max_id)
         if max_message_id > read_inbox_max_id:
-            await self.client.send_read_acknowledge(entity, max_id=max_message_id)
             ack_text = f"已读确认至 {max_message_id}"
         else:
-            ack_text = f"已全部已读(≤{read_inbox_max_id})，跳过已读确认"
+            ack_text = f"活跃更新，已读确认至 {ack_max_id}（无新消息）"
 
         logger.info(
             "群组浏览: %s，读取 %d 条，%s",
@@ -259,23 +301,20 @@ class TgMessageMonitor:
             ack_text,
         )
 
-    def _group_browse_probability(self) -> float:
+    def _current_group_browse_probability(self) -> tuple[float, str]:
         if not self.push_client:
-            return 0.0
+            return 0.0, "未配置"
         if self.push_client.duty_mode:
-            return GROUP_BROWSE_PROBABILITY_DUTY
+            return self.group_browse_probabilities["duty"]
         if self.push_client.is_work_hours():
-            return GROUP_BROWSE_PROBABILITY_WORK
-        return GROUP_BROWSE_PROBABILITY_DEFAULT
+            return self.group_browse_probabilities["work"]
+        return self.group_browse_probabilities["default"]
+
+    def _group_browse_probability(self) -> float:
+        return self._current_group_browse_probability()[0]
 
     def _group_browse_probability_text(self) -> str:
-        if not self.push_client:
-            return "未配置"
-        if self.push_client.duty_mode:
-            return "1/19"
-        if self.push_client.is_work_hours():
-            return "1/3"
-        return "1/29"
+        return self._current_group_browse_probability()[1]
 
     async def _browse_groups_once(self) -> None:
         if not self.group_targets:
