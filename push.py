@@ -6,7 +6,7 @@ import socket
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import deque
+from collections import defaultdict, deque
 from datetime import datetime
 from typing import Any
 
@@ -158,7 +158,7 @@ class PushClient:
         )
         self.runtime_enabled = True
         self.duty_mode = False
-        self._group_broadcast_push_times: deque[datetime] = deque()
+        self._group_broadcast_push_times: dict[str, deque[datetime]] = defaultdict(deque)
 
         if self.config_enabled and not self.device_key:
             raise ValueError("push.device_key 未配置")
@@ -200,8 +200,12 @@ class PushClient:
         replied_to_me: bool,
         in_watch_list: bool = True,
         moment: datetime | None = None,
+        skip_self_mention: bool = False,
     ) -> bool:
         # 优先级：推送开关由 send() 控制；值班 > 上班 > 其他
+        # skip_self_mention：先丢弃 @当前账号，再走后续规则（转发汇总群去重）
+        if skip_self_mention and mentioned:
+            return False
         if in_watch_list:
             if mentioned or replied_to_me:
                 return True
@@ -215,35 +219,52 @@ class PushClient:
             return False
         return mentioned or replied_to_me
 
-    def _prune_group_broadcast_push_times(self, moment: datetime) -> None:
-        cutoff = moment.timestamp() - 60
-        while (
-            self._group_broadcast_push_times
-            and self._group_broadcast_push_times[0].timestamp() <= cutoff
-        ):
-            self._group_broadcast_push_times.popleft()
+    def _group_broadcast_key(self, group_id: str | int) -> str:
+        return str(group_id)
 
-    def is_group_broadcast_rate_limited(self, moment: datetime | None = None) -> bool:
+    def _prune_group_broadcast_push_times(
+        self,
+        group_key: str,
+        moment: datetime,
+    ) -> None:
+        times = self._group_broadcast_push_times.get(group_key)
+        if not times:
+            return
+        cutoff = moment.timestamp() - 60
+        while times and times[0].timestamp() <= cutoff:
+            times.popleft()
+        if not times:
+            self._group_broadcast_push_times.pop(group_key, None)
+
+    def is_group_broadcast_rate_limited(
+        self,
+        group_id: str | int,
+        moment: datetime | None = None,
+    ) -> bool:
         limit = self.group_broadcast_push_limit_per_minute
         if limit <= 0:
             return False
         now = moment or datetime.now()
-        self._prune_group_broadcast_push_times(now)
-        return len(self._group_broadcast_push_times) >= limit
+        group_key = self._group_broadcast_key(group_id)
+        self._prune_group_broadcast_push_times(group_key, now)
+        times = self._group_broadcast_push_times.get(group_key)
+        return bool(times) and len(times) >= limit
 
-    def record_group_broadcast_push(self, moment: datetime | None = None) -> None:
+    def record_group_broadcast_push(
+        self,
+        group_id: str | int,
+        moment: datetime | None = None,
+    ) -> None:
         if self.group_broadcast_push_limit_per_minute <= 0:
             return
-        self._group_broadcast_push_times.append(moment or datetime.now())
+        group_key = self._group_broadcast_key(group_id)
+        self._group_broadcast_push_times[group_key].append(moment or datetime.now())
 
     def group_broadcast_rate_limit_text(self) -> str:
         limit = self.group_broadcast_push_limit_per_minute
         if limit <= 0:
             return "未限制"
-        now = datetime.now()
-        self._prune_group_broadcast_push_times(now)
-        used = len(self._group_broadcast_push_times)
-        return f"{used}/{limit} 条/分钟"
+        return f"每群最多 {limit} 条/分钟"
 
     def _periods_text(self, periods: list[TimePeriod], active: bool) -> str:
         if not periods:

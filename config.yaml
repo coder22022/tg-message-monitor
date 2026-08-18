@@ -41,6 +41,11 @@ monitor:
     - "5509798997"
     # "技术处理集中提醒"
     - "5135511617"
+  # 这些群先丢弃 @当前账号 的消息，再走原有推送流程。
+  # 用于转发汇总群：其他群的 @ 会被程序转到这里，避免重复推送。
+  skip_mention_groups:
+    # "技术处理集中提醒"
+    # - "5135511617"
   group_browse_interval_minutes: 3
   group_browse_message_limit: 15
   group_browse_probability:        # 每轮定时任务的执行概率（非每个群），支持分数(1/2)或小数(0.5)
@@ -57,7 +62,7 @@ push:
   enabled: true
   url: "https://api.day.app"
   device_key: "KFP9bdarh5YM9ZQMMVrTeB"
-  group_broadcast_push_limit_per_minute: 3  # 非 @/引用 的群消息每分钟最多推送条数，0 表示不限制
+  group_broadcast_push_limit_per_minute: 3  # 每个群非 @/引用 消息每分钟最多推送条数，0 表示不限制
   quiet_hours:
     - start: "23:00"
       end: "09:00"

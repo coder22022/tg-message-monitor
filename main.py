@@ -1,6 +1,7 @@
 """
 Telegram 消息监听：私信指定用户、配置群组中 @/回复当前用户。
 上班时段未配置群中 @/回复当前用户 也会推送（需推送开启）。
+skip_mention_groups 中的群会先丢弃 @当前账号 的消息，再走原有推送流程。
 
 依赖: pip install -r requirements.txt
 用法: python main.py -c config.yaml
@@ -136,6 +137,12 @@ class TgMessageMonitor:
         self.groups = {
             variant
             for group in monitor.get("groups", [])
+            for variant in chat_id_variants(group)
+        }
+        self.skip_mention_group_targets = list(monitor.get("skip_mention_groups") or [])
+        self.skip_mention_groups = {
+            variant
+            for group in self.skip_mention_group_targets
             for variant in chat_id_variants(group)
         }
         self.group_targets = list(monitor.get("groups", []))
@@ -446,6 +453,7 @@ class TgMessageMonitor:
             [
                 f"监听私信用户: {len(self.private_users)}",
                 f"监听群组: {len(self.groups)}",
+                f"过滤@群组: {len(self.skip_mention_group_targets)}",
                 f"群组浏览: {self._group_browse_status_text()}",
                 f"命令用户: {len(self.command_users)}",
                 f"运行时长: {hours}小时{minutes}分{seconds}秒",
@@ -600,6 +608,13 @@ class TgMessageMonitor:
             return
 
         mentioned = self._is_mentioned(event)
+        in_skip_mention_group = bool(self.skip_mention_groups) and self._match_identifier(
+            chat, self.skip_mention_groups
+        )
+        if in_skip_mention_group and mentioned:
+            logger.info("过滤汇总群 @当前账号 消息: %s", display_name(chat))
+            return
+
         need_reply_check = in_watch_list or (
             self.push_client is not None
             and not self.push_client.duty_mode
@@ -614,6 +629,7 @@ class TgMessageMonitor:
                 mentioned,
                 replied_to_me,
                 in_watch_list,
+                skip_self_mention=in_skip_mention_group,
             )
         else:
             should_push = in_watch_list and (mentioned or replied_to_me)
@@ -622,10 +638,12 @@ class TgMessageMonitor:
             return
 
         is_priority = mentioned or replied_to_me
+        group_id = getattr(chat, "id", None)
         if self.push_client and not is_priority:
-            if self.push_client.is_group_broadcast_rate_limited():
+            if self.push_client.is_group_broadcast_rate_limited(group_id or display_name(chat)):
                 logger.info(
-                    "群组广播推送已达每分钟上限 (%d)，跳过",
+                    "群组 %s 广播推送已达每分钟上限 (%d)，跳过",
+                    display_name(chat),
                     self.push_client.group_broadcast_push_limit_per_minute,
                 )
                 return
@@ -640,7 +658,7 @@ class TgMessageMonitor:
         self.message_count += 1
         if self.push_client:
             if not is_priority:
-                self.push_client.record_group_broadcast_push()
+                self.push_client.record_group_broadcast_push(group_id or group_name)
             await self.push_client.send(
                 title=f"{group_name}+{sender_name}",
                 content=content,
@@ -668,9 +686,10 @@ class TgMessageMonitor:
         username = f"@{self.me.username}" if self.me.username else str(self.me.id)
         logger.info("已登录: %s (%s)", self.me.first_name, username)
         logger.info(
-            "监听配置 - 私信用户: %s, 群组: %s, 命令用户: %s, 群组浏览间隔: %s分钟",
+            "监听配置 - 私信用户: %s, 群组: %s, 过滤@群组: %s, 命令用户: %s, 群组浏览间隔: %s分钟",
             len(self.private_users),
             len(self.groups),
+            len(self.skip_mention_group_targets),
             len(self.command_users),
             self.group_browse_interval_minutes,
         )
