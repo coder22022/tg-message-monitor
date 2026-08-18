@@ -1,5 +1,6 @@
 """
-Telegram 消息监听：私信指定用户、群组 @ 当前用户或引用回复当前用户。
+Telegram 消息监听：私信指定用户、配置群组中 @/回复当前用户。
+上班时段未配置群中 @/回复当前用户 也会推送（需推送开启）。
 
 依赖: pip install -r requirements.txt
 用法: python main.py -c config.yaml
@@ -497,7 +498,7 @@ class TgMessageMonitor:
                 return True
             self.push_client.open_duty()
             logger.info("命令: 值班模式已开启")
-            await event.reply("值班模式已开启（推送已开启，群消息全量推送）")
+            await event.reply("值班模式已开启（推送已开启，仅配置群全量推送）")
             await self.push_client.send(
                 title=sender_name,
                 content=f"{sender_name} 执行 /open duty，值班模式已开启",
@@ -587,8 +588,9 @@ class TgMessageMonitor:
         chat = await event.get_chat()
         text = event.message.message or ""
         sender = await event.get_sender()
+        in_watch_list = bool(self.groups) and self._match_identifier(chat, self.groups)
 
-        if self.groups and self._match_identifier(chat, self.groups):
+        if in_watch_list:
             group_name = display_name(chat)
             sender_name = display_name(sender)
             display_text = format_telegram_message(event.message, chat)
@@ -597,17 +599,25 @@ class TgMessageMonitor:
         if await self._try_handle_group_command(event, text, sender, chat):
             return
 
-        if not self.groups:
-            return
-
-        if not self._match_identifier(chat, self.groups):
-            return
-
         mentioned = self._is_mentioned(event)
-        replied_to_me = await self._is_reply_to_me(event)
-        should_push = mentioned or replied_to_me
+        need_reply_check = in_watch_list or (
+            self.push_client is not None
+            and not self.push_client.duty_mode
+            and self.push_client.is_work_hours()
+        )
+        replied_to_me = False
+        if need_reply_check:
+            replied_to_me = await self._is_reply_to_me(event)
+
         if self.push_client:
-            should_push = self.push_client.should_notify_group(mentioned, replied_to_me)
+            should_push = self.push_client.should_notify_group(
+                mentioned,
+                replied_to_me,
+                in_watch_list,
+            )
+        else:
+            should_push = in_watch_list and (mentioned or replied_to_me)
+
         if not should_push:
             return
 
@@ -622,6 +632,10 @@ class TgMessageMonitor:
 
         group_name = display_name(chat)
         sender_name = display_name(sender)
+        if not in_watch_list:
+            display_text = format_telegram_message(event.message, chat)
+            print(f"[群组] {group_name} | {sender_name}: {display_text}")
+
         content = format_message_content(message=event.message, chat=chat)
         self.message_count += 1
         if self.push_client:

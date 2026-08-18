@@ -194,14 +194,26 @@ class PushClient:
         now = moment or datetime.now()
         return any(period.contains(now) for period in self.work_periods)
 
-    def should_notify_group(self, mentioned: bool, replied_to_me: bool) -> bool:
-        if mentioned or replied_to_me:
-            return True
+    def should_notify_group(
+        self,
+        mentioned: bool,
+        replied_to_me: bool,
+        in_watch_list: bool = True,
+        moment: datetime | None = None,
+    ) -> bool:
+        # 优先级：推送开关由 send() 控制；值班 > 上班 > 其他
+        if in_watch_list:
+            if mentioned or replied_to_me:
+                return True
+            if self.duty_mode:
+                return True
+            return self.is_work_hours(moment)
+
         if self.duty_mode:
-            return True
-        if self.is_work_hours():
-            return True
-        return False
+            return False
+        if not self.is_work_hours(moment):
+            return False
+        return mentioned or replied_to_me
 
     def _prune_group_broadcast_push_times(self, moment: datetime) -> None:
         cutoff = moment.timestamp() - 60
@@ -261,10 +273,10 @@ class PushClient:
         if self.is_quiet_hours():
             return "免打扰中（不推送）"
         if self.duty_mode:
-            return "值班模式（群消息全量推送）"
+            return "值班模式（配置群全量推送）"
         if self.is_work_hours():
-            return "上班时间（群消息全量推送）"
-        return "默认（仅 @/回复 推送）"
+            return "上班时间（配置群全量推送，未配置群 @/回复 推送）"
+        return "默认（配置群仅 @/回复 推送）"
 
     def build_status_lines(self) -> list[str]:
         return [
