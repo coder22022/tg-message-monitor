@@ -35,13 +35,35 @@ monitor:
     work: "1/3"                       # 上班时间
     default: "1/29"                   # 其他时段
 
-# 可发送管理命令的私信用户（username 或 user_id）
-# 群消息支持 /id@当前用户 命令，返回当前群 ID
-# 私信命令: /open push /close push /open duty /close duty /status
+# 管理命令：推荐配置 bot_token，用 @BotFather 创建机器人后在对话框「/」菜单操作
+# command.users 中的用户可使用机器人；监听账号私信仍支持旧命令
+# 机器人命令: /status /push_on /push_off /duty_on /duty_off /chatid /export_groups /help
+# 群消息仍支持 /id@监听账号用户名 返回群 ID（由监听账号处理）
 command:
   users:
     - "your_user_id"
     # - "admin_username"
+  # bot_token: "123456789:AA..."
+
+# /export_groups 导出登录账号加入的群与成员（groups_export.xlsx，两个 sheet）
+# include_groups 非空时仅导出列表中的群；exclude_groups 始终排除
+group_export:
+  output_dir: exports
+  include_groups: []
+  # - "-1001234567890"
+  exclude_groups: []
+  # - "spam_group_username"
+  download_avatars: true
+  exclude_bots: true              # 成员 sheet 排除机器人
+  exclude_deleted_accounts: true  # 排除已注销/失效账号
+  exclude_scam_accounts: true
+  exclude_fake_accounts: true
+  max_members_per_group: 0   # 0 表示不限制；groups 表 includes_all_members 表示未触达该上限
+  groups_per_checkpoint: 5   # 每导出 N 个群暂停，由机器人在聊天中确认；0=不分批
+  checkpoint_timeout_seconds: 120  # 确认超时（秒），超时视为终止
+  # /export_groups 10 — 每批 10 个群（N<1000）
+  # /export_groups 4215609865 — 群 ID 精确匹配（N≥1000）
+  # /export_groups decent — 群名称/用户名模糊匹配 %decent%
 
 push:
   enabled: true

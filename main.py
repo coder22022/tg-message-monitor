@@ -22,6 +22,19 @@ import yaml
 from telethon import TelegramClient, events
 from telethon.tl.functions.messages import GetPeerDialogsRequest
 
+from admin_command_result import AdminCommandResult
+from admin_commands import normalize_command, resolve_admin_command
+from export_command import (
+    export_filter_summary,
+    parse_export_groups_args,
+    resolve_export_batch_size,
+)
+from export_delivery import (
+    DEFAULT_CHECKPOINT_TIMEOUT_SECONDS,
+    ExportCommandContext,
+    ExportCheckpointCoordinator,
+)
+from group_export import export_account_groups
 from push import PushClient, display_name, format_message_content
 from message_format import format_telegram_message
 
@@ -109,10 +122,6 @@ def resolve_group_ref(group_ref: str | int) -> str | int:
     return int(f"-100{num}")
 
 
-def normalize_command(text: str) -> str:
-    return " ".join(text.strip().lower().split())
-
-
 class TgMessageMonitor:
     def __init__(self, config: dict[str, Any]) -> None:
         tg = config["telegram"]
@@ -170,6 +179,9 @@ class TgMessageMonitor:
         self.command_users = {
             normalize_identifier(u) for u in command_cfg.get("users", [])
         }
+        bot_token = command_cfg.get("bot_token")
+        self.bot_token = str(bot_token).strip() if bot_token else None
+        self.group_export_config = dict(config.get("group_export") or {})
 
         push_cfg = config.get("push")
         self.push_client = PushClient(push_cfg) if push_cfg else None
@@ -180,6 +192,20 @@ class TgMessageMonitor:
         self.message_count = 0
         self._group_browse_task: asyncio.Task | None = None
         self._group_entity_cache: dict[str, Any] = {}
+        self._admin_bot_task: asyncio.Task | None = None
+        self._admin_bot: Any = None
+        self._group_export_lock = asyncio.Lock()
+        self._export_checkpoint_coordinator = ExportCheckpointCoordinator()
+
+    def is_command_user(self, user_id: int | None, username: str | None) -> bool:
+        if not self.command_users:
+            return False
+        candidates: set[str] = set()
+        if user_id is not None:
+            candidates.update(chat_id_variants(user_id))
+        if username:
+            candidates.add(normalize_identifier(username))
+        return bool(candidates & self.command_users)
 
     def _match_identifier(self, entity: Any, identifiers: set[str]) -> bool:
         if not identifiers or entity is None:
@@ -462,77 +488,259 @@ class TgMessageMonitor:
         )
         return "\n".join(lines)
 
+    def _admin_help_text(self) -> str:
+        return (
+            "管理命令（可在输入框旁「/」菜单选择）:\n"
+            "/status — 系统状态\n"
+            "/push_on — 开启推送\n"
+            "/push_off — 关闭推送\n"
+            "/duty_on — 开启值班模式\n"
+            "/duty_off — 关闭值班模式\n"
+            "/chatid — 当前群或会话 ID\n"
+            "/export_groups [N|keyword|群ID] — 导出 Excel\n"
+            "  N<1000: 每批群数；≥1000 或名称: 按 ID/名称筛选群\n\n"
+            "监听账号私信仍支持旧写法: /open push、/close push 等"
+        )
+
+    async def _run_export_groups(
+        self,
+        sender_name: str,
+        *,
+        command_text: str | None = None,
+        export_context: ExportCommandContext | None = None,
+    ) -> AdminCommandResult:
+        if self._group_export_lock.locked():
+            return AdminCommandResult("已有群导出任务进行中，请稍后再试")
+
+        export_args = parse_export_groups_args(command_text)
+        batch_size = resolve_export_batch_size(
+            command_text,
+            self.group_export_config,
+        )
+        filter_note = export_filter_summary(export_args.command_filter)
+        if batch_size and (not self.bot_token or not self._admin_bot):
+            return AdminCommandResult(
+                "分批导出需配置 bot_token 且机器人已启动，请在机器人对话中执行"
+            )
+        if batch_size and export_context is None:
+            return AdminCommandResult("分批导出缺少机器人会话上下文")
+
+        timeout_seconds = int(
+            self.group_export_config.get(
+                "checkpoint_timeout_seconds",
+                DEFAULT_CHECKPOINT_TIMEOUT_SECONDS,
+            )
+            or DEFAULT_CHECKPOINT_TIMEOUT_SECONDS
+        )
+
+        async def on_checkpoint(
+            processed: int,
+            total: int,
+            export_file: Path,
+        ) -> bool:
+            assert self._admin_bot is not None
+            assert export_context is not None
+            return await self._export_checkpoint_coordinator.wait_for_confirmation(
+                self._admin_bot.bot,
+                export_context,
+                processed=processed,
+                total=total,
+                export_file=export_file,
+                timeout_seconds=timeout_seconds,
+            )
+
+        async with self._group_export_lock:
+            logger.info(
+                "命令: %s 开始导出群组 (batch=%s, filter=%s)",
+                sender_name,
+                batch_size or "全部",
+                filter_note or "无",
+            )
+            try:
+                export_data = await export_account_groups(
+                    self.client,
+                    self.group_export_config,
+                    checkpoint_every=batch_size,
+                    on_checkpoint=on_checkpoint if batch_size else None,
+                    command_filter=export_args.command_filter,
+                )
+            except Exception as exc:
+                logger.exception("群导出失败")
+                return AdminCommandResult(f"群导出失败: {exc}")
+
+        group_count = len(export_data.group_rows)
+        if export_args.command_filter is not None and group_count == 0:
+            return AdminCommandResult(
+                f"未匹配到任何群（{filter_note or '请检查关键词或群 ID'}）"
+            )
+        member_count = len(export_data.member_rows)
+        excel_path = export_data.excel_path
+        logger.info(
+            "命令: 群导出结束 %s (%d 群, %d 成员行, cancelled=%s)",
+            excel_path,
+            group_count,
+            member_count,
+            export_data.cancelled,
+        )
+
+        if export_data.cancelled:
+            return AdminCommandResult(
+                text=(
+                    f"导出已终止：已完成 {group_count} 个群，"
+                    f"{member_count} 条成员记录"
+                )
+            )
+
+        caption = (
+            f"导出完成：{group_count} 个群，{member_count} 条成员记录\n"
+            f"附件：{excel_path.name}（groups / members 两个 sheet）"
+        )
+        return AdminCommandResult(
+            text=caption,
+            documents=(excel_path,),
+        )
+
+    async def run_admin_command(
+        self,
+        command_key: str,
+        *,
+        sender_name: str,
+        message_date: datetime,
+        chat_id: int | None = None,
+        command_text: str | None = None,
+        export_context: ExportCommandContext | None = None,
+    ) -> AdminCommandResult:
+        if command_key == "help":
+            return AdminCommandResult(self._admin_help_text())
+
+        if command_key == "chatid":
+            if chat_id is None:
+                return AdminCommandResult("无法获取会话 ID")
+            logger.info("命令: 机器人返回会话 ID %s", chat_id)
+            return AdminCommandResult(str(chat_id))
+
+        if command_key == "status":
+            return AdminCommandResult(self._build_status())
+
+        if command_key == "export_groups":
+            return await self._run_export_groups(
+                sender_name,
+                command_text=command_text,
+                export_context=export_context,
+            )
+
+        if command_key == "open_push":
+            if not self.push_client:
+                return AdminCommandResult("未配置推送服务")
+            self.push_client.open_push()
+            logger.info("命令: 推送已开启")
+            await self.push_client.send(
+                title=sender_name,
+                content=f"{sender_name} 执行 push_on，推送已开启",
+                message_date=message_date,
+            )
+            return AdminCommandResult("推送已开启")
+
+        if command_key == "close_push":
+            if not self.push_client:
+                return AdminCommandResult("未配置推送服务")
+            self.push_client.close_push()
+            logger.info("命令: 推送已关闭")
+            await self.push_client.send(
+                title=sender_name,
+                content=f"{sender_name} 执行 push_off，推送已关闭",
+                message_date=message_date,
+                force=True,
+            )
+            return AdminCommandResult("推送已关闭，消息仅打印")
+
+        if command_key == "open_duty":
+            if not self.push_client:
+                return AdminCommandResult("未配置推送服务")
+            self.push_client.open_duty()
+            logger.info("命令: 值班模式已开启")
+            await self.push_client.send(
+                title=sender_name,
+                content=f"{sender_name} 执行 duty_on，值班模式已开启",
+                message_date=message_date,
+            )
+            return AdminCommandResult("值班模式已开启（推送已开启，仅配置群全量推送）")
+
+        if command_key == "close_duty":
+            if not self.push_client:
+                return AdminCommandResult("未配置推送服务")
+            self.push_client.close_duty()
+            logger.info("命令: 值班模式已关闭")
+            await self.push_client.send(
+                title=sender_name,
+                content=f"{sender_name} 执行 duty_off，值班模式已关闭",
+                message_date=message_date,
+            )
+            return AdminCommandResult("值班模式已关闭（推送保持当前状态）")
+
+        return AdminCommandResult("未知命令")
+
     async def _try_handle_command(
         self,
         event: events.NewMessage.Event,
         text: str,
         sender: Any,
     ) -> bool:
-        command = normalize_command(text)
+        command_key = resolve_admin_command(text)
+        if not command_key or command_key in ("help", "chatid"):
+            return False
+
         sender_name = display_name(sender)
-
-        if command == "/open push":
-            if not self.push_client:
-                await event.reply("未配置推送服务")
-                return True
-            self.push_client.open_push()
-            logger.info("命令: 推送已开启")
-            await event.reply("推送已开启")
-            await self.push_client.send(
-                title=sender_name,
-                content=f"{sender_name} 执行 /open push，推送已开启",
-                message_date=event.message.date,
+        sender_id = getattr(sender, "id", None)
+        export_context = None
+        if command_key == "export_groups" and sender_id is not None:
+            export_context = ExportCommandContext(
+                user_id=int(sender_id),
+                chat_id=int(sender_id),
             )
-            return True
+        result = await self.run_admin_command(
+            command_key,
+            sender_name=sender_name,
+            message_date=event.message.date,
+            chat_id=getattr(await event.get_chat(), "id", None),
+            command_text=text,
+            export_context=export_context,
+        )
+        if result.text == "未知命令":
+            return False
+        await self._reply_admin_result(event, result)
+        return True
 
-        if command == "/close push":
-            if not self.push_client:
-                await event.reply("未配置推送服务")
-                return True
-            self.push_client.close_push()
-            logger.info("命令: 推送已关闭")
-            await event.reply("推送已关闭，消息仅打印")
-            await self.push_client.send(
-                title=sender_name,
-                content=f"{sender_name} 执行 /close push，推送已关闭",
-                message_date=event.message.date,
-                force=True,
+    async def _reply_admin_result(
+        self,
+        event: events.NewMessage.Event,
+        result: AdminCommandResult,
+    ) -> None:
+        reply_to = event.message.id
+        chat = await event.get_chat()
+        attachments = [
+            path for path in result.attachment_paths() if path.is_file()
+        ]
+        if attachments:
+            for index, file_path in enumerate(attachments):
+                caption = result.text if index == 0 else file_path.name
+                await self.client.send_message(
+                    chat,
+                    caption,
+                    reply_to=reply_to,
+                    file=file_path,
+                )
+                await asyncio.sleep(0.25)
+            return
+
+        for message in (result.text, *result.reply_messages):
+            if not message or not message.strip():
+                continue
+            await self.client.send_message(
+                chat,
+                message,
+                reply_to=reply_to,
             )
-            return True
-
-        if command == "/open duty":
-            if not self.push_client:
-                await event.reply("未配置推送服务")
-                return True
-            self.push_client.open_duty()
-            logger.info("命令: 值班模式已开启")
-            await event.reply("值班模式已开启（推送已开启，仅配置群全量推送）")
-            await self.push_client.send(
-                title=sender_name,
-                content=f"{sender_name} 执行 /open duty，值班模式已开启",
-                message_date=event.message.date,
-            )
-            return True
-
-        if command == "/close duty":
-            if not self.push_client:
-                await event.reply("未配置推送服务")
-                return True
-            self.push_client.close_duty()
-            logger.info("命令: 值班模式已关闭")
-            await event.reply("值班模式已关闭（推送保持当前状态）")
-            await self.push_client.send(
-                title=sender_name,
-                content=f"{sender_name} 执行 /close duty，值班模式已关闭",
-                message_date=event.message.date,
-            )
-            return True
-
-        if command == "/status":
-            await event.reply(self._build_status())
-            return True
-
-        return False
 
     def _group_id_command(self) -> str | None:
         if not self.me or not self.me.username:
@@ -571,6 +779,17 @@ class TgMessageMonitor:
         text = event.message.message or ""
 
         if self.command_users and self._match_identifier(sender, self.command_users):
+            cmd_key = resolve_admin_command(text)
+            if cmd_key == "help":
+                await event.reply(self._admin_help_text())
+                return
+            if cmd_key == "chatid":
+                chat_id = getattr(chat, "id", None)
+                if chat_id is None:
+                    await event.reply("无法获取会话 ID")
+                else:
+                    await event.reply(str(chat_id))
+                return
             if await self._try_handle_command(event, text, sender):
                 return
 
@@ -701,10 +920,31 @@ class TgMessageMonitor:
             except Exception:
                 logger.exception("处理消息失败")
 
+        if self.bot_token:
+            if not self.command_users:
+                logger.warning("已配置 bot_token 但 command.users 为空，机器人将拒绝所有操作")
+            from admin_bot import AdminTelegramBot
+
+            bot = AdminTelegramBot(self, self.bot_token)
+            self._admin_bot = bot
+            self._admin_bot_task = asyncio.create_task(bot.run())
+        elif self.command_users:
+            logger.info(
+                "未配置 command.bot_token；可在 config 中填写以启用带菜单的管理机器人"
+            )
+
         logger.info("开始监听，按 Ctrl+C 退出...")
         await self._warm_group_entity_cache()
         self._start_group_browse()
-        await self.client.run_until_disconnected()
+        try:
+            await self.client.run_until_disconnected()
+        finally:
+            if self._admin_bot_task and not self._admin_bot_task.done():
+                self._admin_bot_task.cancel()
+                try:
+                    await self._admin_bot_task
+                except asyncio.CancelledError:
+                    pass
 
 
 def parse_args() -> argparse.Namespace:
