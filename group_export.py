@@ -13,10 +13,12 @@ from typing import Any
 from openpyxl import Workbook
 from telethon import TelegramClient
 from telethon.errors import ChatAdminRequiredError, UserNotParticipantError
-from telethon.tl.functions.channels import GetFullChannelRequest
+from telethon.tl.functions.channels import GetFullChannelRequest, GetParticipantsRequest
 from telethon.tl.functions.messages import GetFullChatRequest
 from telethon.tl.types import (
     Channel,
+    ChannelParticipantAdmin,
+    ChannelParticipantCreator,
     ChannelParticipantsAdmins,
     Chat,
     ChatParticipantAdmin,
@@ -57,6 +59,7 @@ MEMBER_CSV_HEADERS = [
     "is_bot",
     "is_premium",
     "is_admin",
+    "is_creator",
     "is_deleted",
     "phone",
     "avatar_path",
@@ -313,38 +316,64 @@ async def _collect_export_dialogs(
     return selected
 
 
-async def _collect_group_admin_user_ids(
+async def _collect_group_role_user_ids(
     client: TelegramClient,
     entity: Any,
-) -> set[int]:
+) -> tuple[set[int], set[int]]:
+    creator_ids: set[int] = set()
     admin_ids: set[int] = set()
     try:
         if isinstance(entity, Chat):
             full = await client(GetFullChatRequest(entity.id))
             participants = getattr(full.full_chat.participants, "participants", None) or []
             for participant in participants:
-                if isinstance(participant, (ChatParticipantAdmin, ChatParticipantCreator)):
-                    admin_ids.add(int(participant.user_id))
-            return admin_ids
+                user_id = int(participant.user_id)
+                if isinstance(participant, ChatParticipantCreator):
+                    creator_ids.add(user_id)
+                elif isinstance(participant, ChatParticipantAdmin):
+                    admin_ids.add(user_id)
+            return creator_ids, admin_ids
 
-        async for user in client.iter_participants(
-            entity,
-            filter=ChannelParticipantsAdmins,
-        ):
-            if isinstance(user, User):
-                admin_ids.add(user.id)
+        offset = 0
+        limit = 200
+        while True:
+            result = await client(
+                GetParticipantsRequest(
+                    channel=entity,
+                    filter=ChannelParticipantsAdmins(),
+                    offset=offset,
+                    limit=limit,
+                    hash=0,
+                )
+            )
+            if not result.participants:
+                break
+            for participant in result.participants:
+                user_id = getattr(participant, "user_id", None)
+                if user_id is None:
+                    continue
+                uid = int(user_id)
+                if isinstance(participant, ChannelParticipantCreator):
+                    creator_ids.add(uid)
+                elif isinstance(participant, ChannelParticipantAdmin):
+                    admin_ids.add(uid)
+                else:
+                    admin_ids.add(uid)
+            if len(result.participants) < limit:
+                break
+            offset += len(result.participants)
     except (ChatAdminRequiredError, UserNotParticipantError) as exc:
         logger.warning(
-            "无法拉取群管理员列表 %s: %s",
+            "无法拉取群管理员/创建者列表 %s: %s",
             getattr(entity, "title", entity),
             exc,
         )
     except Exception:
         logger.exception(
-            "拉取群管理员列表失败: %s",
+            "拉取群管理员/创建者列表失败: %s",
             getattr(entity, "title", entity),
         )
-    return admin_ids
+    return creator_ids, admin_ids
 
 
 async def _export_single_dialog(
@@ -386,7 +415,9 @@ async def _export_single_dialog(
     member_rows: list[dict[str, Any]] = []
     exported_member_count = 0
     hit_member_export_limit = False
-    admin_user_ids = await _collect_group_admin_user_ids(client, entity)
+    creator_user_ids, admin_user_ids = await _collect_group_role_user_ids(
+        client, entity
+    )
     try:
         async for user in client.iter_participants(entity):
             if not isinstance(user, User):
@@ -408,6 +439,7 @@ async def _export_single_dialog(
                     "is_bot": user.bot,
                     "is_premium": bool(getattr(user, "premium", False)),
                     "is_admin": user.id in admin_user_ids,
+                    "is_creator": user.id in creator_user_ids,
                     "is_deleted": bool(getattr(user, "deleted", False)),
                     "phone": user.phone or "",
                     "avatar_path": avatar_path,

@@ -45,6 +45,7 @@ class WriteExportWorkbookTests(unittest.TestCase):
                     "is_bot": False,
                     "is_premium": False,
                     "is_admin": False,
+                    "is_creator": False,
                     "is_deleted": False,
                     "phone": "",
                     "avatar_path": "",
