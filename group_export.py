@@ -216,6 +216,26 @@ def user_display_name(user: User) -> str:
     return str(user.id)
 
 
+def _ascending_text_sort_key(text: str) -> tuple[str, str]:
+    normalized = (text or "").strip()
+    return (normalized.casefold(), normalized)
+
+
+def _dialog_group_title(dialog: Any) -> str:
+    entity = getattr(dialog, "entity", None)
+    return getattr(entity, "title", "") or ""
+
+
+def _sort_dialogs_by_group_title(dialogs: list[Any]) -> None:
+    dialogs.sort(key=lambda d: _ascending_text_sort_key(_dialog_group_title(d)))
+
+
+def _sort_members_by_display_name(rows: list[dict[str, Any]]) -> None:
+    rows.sort(
+        key=lambda r: _ascending_text_sort_key(str(r.get("display_name", ""))),
+    )
+
+
 async def _fetch_group_details(client: TelegramClient, entity: Any) -> dict[str, Any]:
     description = ""
     member_count: int | None = None
@@ -313,6 +333,7 @@ async def _collect_export_dialogs(
         ):
             continue
         selected.append(dialog)
+    _sort_dialogs_by_group_title(selected)
     return selected
 
 
@@ -459,6 +480,8 @@ async def _export_single_dialog(
 
     includes_all_members = max_members <= 0 or not hit_member_export_limit
     group_row["includes_all_members"] = includes_all_members
+
+    _sort_members_by_display_name(member_rows)
 
     await asyncio.sleep(GROUP_FETCH_DELAY_SECONDS)
     return group_row, member_rows

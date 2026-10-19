@@ -7,6 +7,8 @@ from openpyxl import load_workbook
 from group_export import (
     GROUP_CSV_HEADERS,
     MEMBER_CSV_HEADERS,
+    _sort_dialogs_by_group_title,
+    _sort_members_by_display_name,
     _write_export_workbook,
 )
 
@@ -69,6 +71,34 @@ class WriteExportWorkbookTests(unittest.TestCase):
             )
             self.assertEqual(members[2][0].value, 1)
             workbook.close()
+
+    def test_sort_dialogs_by_group_title(self) -> None:
+        class _Entity:
+            def __init__(self, title: str) -> None:
+                self.title = title
+
+        class _Dialog:
+            def __init__(self, title: str) -> None:
+                self.entity = _Entity(title)
+
+        dialogs = [_Dialog("Beta"), _Dialog("alpha"), _Dialog("Alpha")]
+        _sort_dialogs_by_group_title(dialogs)
+        self.assertEqual(
+            [d.entity.title for d in dialogs],
+            ["Alpha", "alpha", "Beta"],
+        )
+
+    def test_sort_members_by_display_name(self) -> None:
+        rows = [
+            {"display_name": "Bob"},
+            {"display_name": "alice"},
+            {"display_name": "Alice"},
+        ]
+        _sort_members_by_display_name(rows)
+        self.assertEqual(
+            [r["display_name"] for r in rows],
+            ["Alice", "alice", "Bob"],
+        )
 
 
 if __name__ == "__main__":
