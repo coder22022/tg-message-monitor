@@ -15,7 +15,14 @@ from telethon import TelegramClient
 from telethon.errors import ChatAdminRequiredError, UserNotParticipantError
 from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.tl.functions.messages import GetFullChatRequest
-from telethon.tl.types import Channel, Chat, User
+from telethon.tl.types import (
+    Channel,
+    ChannelParticipantsAdmins,
+    Chat,
+    ChatParticipantAdmin,
+    ChatParticipantCreator,
+    User,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +56,7 @@ MEMBER_CSV_HEADERS = [
     "display_name",
     "is_bot",
     "is_premium",
+    "is_admin",
     "is_deleted",
     "phone",
     "avatar_path",
@@ -305,6 +313,40 @@ async def _collect_export_dialogs(
     return selected
 
 
+async def _collect_group_admin_user_ids(
+    client: TelegramClient,
+    entity: Any,
+) -> set[int]:
+    admin_ids: set[int] = set()
+    try:
+        if isinstance(entity, Chat):
+            full = await client(GetFullChatRequest(entity.id))
+            participants = getattr(full.full_chat.participants, "participants", None) or []
+            for participant in participants:
+                if isinstance(participant, (ChatParticipantAdmin, ChatParticipantCreator)):
+                    admin_ids.add(int(participant.user_id))
+            return admin_ids
+
+        async for user in client.iter_participants(
+            entity,
+            filter=ChannelParticipantsAdmins,
+        ):
+            if isinstance(user, User):
+                admin_ids.add(user.id)
+    except (ChatAdminRequiredError, UserNotParticipantError) as exc:
+        logger.warning(
+            "无法拉取群管理员列表 %s: %s",
+            getattr(entity, "title", entity),
+            exc,
+        )
+    except Exception:
+        logger.exception(
+            "拉取群管理员列表失败: %s",
+            getattr(entity, "title", entity),
+        )
+    return admin_ids
+
+
 async def _export_single_dialog(
     client: TelegramClient,
     dialog: Any,
@@ -344,6 +386,7 @@ async def _export_single_dialog(
     member_rows: list[dict[str, Any]] = []
     exported_member_count = 0
     hit_member_export_limit = False
+    admin_user_ids = await _collect_group_admin_user_ids(client, entity)
     try:
         async for user in client.iter_participants(entity):
             if not isinstance(user, User):
@@ -364,6 +407,7 @@ async def _export_single_dialog(
                     "display_name": user_display_name(user),
                     "is_bot": user.bot,
                     "is_premium": bool(getattr(user, "premium", False)),
+                    "is_admin": user.id in admin_user_ids,
                     "is_deleted": bool(getattr(user, "deleted", False)),
                     "phone": user.phone or "",
                     "avatar_path": avatar_path,
